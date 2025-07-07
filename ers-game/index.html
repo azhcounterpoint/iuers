@@ -3,17 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Egyptian Rat Screw</title>
+    <title>Egyptian Rat Screw (Multiplayer)</title>
     <link rel="stylesheet" href="style.css">
     <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
-    <script src="firebase-config.js"></script>
 </head>
 <body>
     <div class="game-container">
         <div class="header">
             <h1>Egyptian Rat Screw</h1>
             <div class="player-count">Players: <span id="player-count">0</span></div>
+            <div id="connection-status" class="connection-status">Offline</div>
         </div>
 
         <div class="game-area">
@@ -41,16 +41,16 @@
             <div class="rules-options">
                 <div class="rules-column">
                     <h3>Slap Rules</h3>
-                    <label><input type="checkbox" id="rule-doubles" checked> Doubles (two same cards)</label>
-                    <label><input type="checkbox" id="rule-sandwich" checked> Sandwich (two same with one between)</label>
-                    <label><input type="checkbox" id="rule-marriage" checked> Marriage (King & Queen)</label>
-                    <label><input type="checkbox" id="rule-top-bottom" checked> Top & Bottom (first and last match)</label>
-                    <label><input type="checkbox" id="rule-adds-to-10" checked> Cards add to 10</label>
-                    <label><input type="checkbox" id="rule-runs" checked> Runs (4 ascending/descending)</label>
+                    <label><input type="checkbox" id="rule-doubles" checked> Doubles</label>
+                    <label><input type="checkbox" id="rule-sandwich" checked> Sandwich</label>
+                    <label><input type="checkbox" id="rule-marriage" checked> Marriage</label>
+                    <label><input type="checkbox" id="rule-top-bottom" checked> Top & Bottom</label>
+                    <label><input type="checkbox" id="rule-adds-to-10" checked> Adds to 10</label>
+                    <label><input type="checkbox" id="rule-runs" checked> Runs</label>
                 </div>
                 <div class="rules-column">
                     <h3>Face Card Rules</h3>
-                    <label><input type="checkbox" id="rule-face-cards" checked> Enable Face Card Challenges</label>
+                    <label><input type="checkbox" id="rule-face-cards" checked> Enable Face Cards</label>
                 </div>
             </div>
             <div class="game-info">
@@ -58,6 +58,7 @@
                 <p>Your cards: <span id="card-count">0</span></p>
                 <p>Status: <span id="game-status">Waiting for players...</span></p>
                 <p id="face-card-challenge"></p>
+                <p id="system-message" class="system-message"></p>
             </div>
         </div>
 
@@ -78,6 +79,7 @@
         </div>
     </div>
 
+    <script src="firebase-config.js"></script>
     <script src="script.js"></script>
 </body>
 </html>
