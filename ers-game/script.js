@@ -65,7 +65,8 @@ const elements = {
     ruleRuns: document.getElementById('rule-runs'),
     ruleFaceCards: document.getElementById('rule-face-cards'),
     connectionStatus: document.getElementById('connection-status'),
-    systemMessage: document.getElementById('system-message')
+    systemMessage: document.getElementById('system-message'),
+    connectionHelp: document.getElementById('connection-help')
 };
 
 // Initialize Firebase
@@ -73,46 +74,66 @@ const database = firebase.database();
 
 function initFirebase() {
     // Setup presence detection
-    const isOfflineForDatabase = {
-        state: 'offline',
-        lastActive: firebase.database.ServerValue.TIMESTAMP
-    };
-
     const isOnlineForDatabase = {
         state: 'online',
         lastActive: firebase.database.ServerValue.TIMESTAMP
     };
 
-    database.ref('.info/connected').on('value', (snapshot) => {
+    const connectionRef = database.ref('.info/connected');
+    
+    connectionRef.on('value', (snapshot) => {
         if (snapshot.val() === false) {
-            elements.connectionStatus.textContent = 'Offline';
-            elements.connectionStatus.classList.remove('connected');
+            updateConnectionStatus('offline');
             return;
         }
-
-        elements.connectionStatus.textContent = 'Online';
-        elements.connectionStatus.classList.add('connected');
-
+        
+        updateConnectionStatus('online');
+        
         if (gameState.playerId) {
             const playerRef = database.ref(`games/${gameState.gameId}/players/${gameState.playerId}`);
             playerRef.update(isOnlineForDatabase);
-            playerRef.onDisconnect().update(isOfflineForDatabase);
-            playerRef.onDisconnect().remove().catch(() => {});
+            playerRef.onDisconnect().remove().catch(console.error);
         }
+    }, (error) => {
+        console.error("Connection error:", error);
+        updateConnectionStatus('error');
     });
 
     // Listen for game state changes
     database.ref(`games/${gameState.gameId}`).on('value', (snapshot) => {
         const data = snapshot.val();
-        if (data) {
-            // Track previous players for disconnect detection
-            gameState.previousPlayers = {...gameState.players};
-            
-            updateGameState(data);
-            renderGame();
-            checkPlayerChanges();
-        }
+        if (!data) return;
+        
+        updateGameState(data);
+        renderGame();
+        checkPlayerChanges();
     });
+}
+
+function updateConnectionStatus(status) {
+    const statusElement = elements.connectionStatus;
+    const helpElement = elements.connectionHelp;
+    
+    switch(status) {
+        case 'online':
+            statusElement.textContent = 'Online';
+            statusElement.className = 'connection-status connected';
+            helpElement.textContent = 'Connected to server';
+            elements.joinGameBtn.disabled = false;
+            break;
+        case 'offline':
+            statusElement.textContent = 'Offline';
+            statusElement.className = 'connection-status';
+            helpElement.textContent = 'Trying to reconnect...';
+            elements.joinGameBtn.disabled = true;
+            break;
+        case 'error':
+            statusElement.textContent = 'Error';
+            statusElement.className = 'connection-status error';
+            helpElement.textContent = 'Connection error - refresh page';
+            elements.joinGameBtn.disabled = true;
+            break;
+    }
 }
 
 function checkPlayerChanges() {
@@ -138,13 +159,17 @@ function showSystemMessage(message) {
     }, 5000);
 }
 
-// Update game state from Firebase data
 function updateGameState(data) {
     // Filter out inactive players (lastActive > 60 seconds ago)
     const activePlayers = {};
     const now = Date.now();
     Object.entries(data.players || {}).forEach(([id, player]) => {
         if (!player.lastActive || (now - player.lastActive) < 60000) {
+            activePlayers[id] = player;
+        } else if (id === gameState.playerId) {
+            // If we're marked inactive but still here, update our status
+            database.ref(`games/${gameState.gameId}/players/${id}/lastActive`)
+                .set(firebase.database.ServerValue.TIMESTAMP);
             activePlayers[id] = player;
         }
     });
@@ -182,6 +207,7 @@ function updateGameState(data) {
 }
 
 function renderGame() {
+    // Update player count and list
     const playerCount = Object.keys(gameState.players).length;
     elements.playerCount.textContent = playerCount;
     
@@ -240,6 +266,12 @@ function renderGame() {
     }
     
     // Update button states
+    updateButtonStates();
+    
+    checkForWinner();
+}
+
+function updateButtonStates() {
     const isCurrentPlayer = gameState.currentPlayer === gameState.playerId;
     const hasCards = gameState.playerId && gameState.players[gameState.playerId]?.cards.length > 0;
     
@@ -250,8 +282,6 @@ function renderGame() {
     elements.mobilePlay.disabled = elements.playCardBtn.disabled;
     elements.mobileSlap.disabled = elements.slapBtn.disabled;
     elements.mobileBurn.disabled = elements.burnBtn.disabled;
-    
-    checkForWinner();
 }
 
 function createCardElement(cardName) {
@@ -268,13 +298,18 @@ function joinGame() {
     gameState.playerName = name;
     gameState.playerId = generateId();
     
-    const playerRef = firebase.database().ref(`games/${gameState.gameId}/players/${gameState.playerId}`);
+    const playerRef = database.ref(`games/${gameState.gameId}/players/${gameState.playerId}`);
     playerRef.set({
         id: gameState.playerId,
         name: gameState.playerName,
-        cards: []
+        cards: [],
+        lastActive: firebase.database.ServerValue.TIMESTAMP
     });
     
+    // Setup disconnect handler
+    playerRef.onDisconnect().remove().catch(console.error);
+    
+    // Initialize rules if first player
     firebase.database().ref(`games/${gameState.gameId}`).once('value').then(snapshot => {
         if (!snapshot.exists() || !snapshot.val().rules) {
             updateRules();
@@ -297,6 +332,7 @@ function startGame() {
     updates['currentPlayerIndex'] = 0;
     updates['gameStarted'] = true;
     
+    // Deal cards to players
     let currentPlayerIndex = 0;
     while (deck.length > 0) {
         const playerId = playerOrder[currentPlayerIndex];
@@ -324,6 +360,7 @@ function createShuffledDeck() {
         }
     }
     
+    // Fisher-Yates shuffle
     for (let i = deck.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [deck[i], deck[j]] = [deck[j], deck[i]];
@@ -343,120 +380,103 @@ function playCard() {
     updates[`players/${gameState.playerId}/cards`] = player.cards;
     updates['centerPile'] = [...gameState.centerPile, card];
     updates['lastPlayedCards'] = [card];
+    updates[`players/${gameState.playerId}/lastActive`] = firebase.database.ServerValue.TIMESTAMP;
     
-    // Check for face card
-    if (gameState.rules.faceCards) {
-        const cardValue = getCardValue(card);
-        const isFaceCard = ['jack', 'queen', 'king', 'ace'].includes(cardValue);
-        
-        if (isFaceCard && !gameState.faceCardChallenge.active) {
-            // Start face card challenge
-            let attempts = 0;
-            switch (cardValue) {
-                case 'ace': attempts = 4; break;
-                case 'king': attempts = 3; break;
-                case 'queen': attempts = 2; break;
-                case 'jack': attempts = 1; break;
-            }
-            
-            updates['faceCardChallenge'] = {
-                active: true,
-                faceCard: card,
-                attemptsLeft: attempts,
-                originalPlayer: gameState.playerId
-            };
-        } else if (gameState.faceCardChallenge.active) {
-            // Continue face card challenge
-            const newChallenge = {...gameState.faceCardChallenge};
-            newChallenge.attemptsLeft--;
-            
-            // Check if challenge is met
-            if (['jack', 'queen', 'king', 'ace'].includes(cardValue)) {
-                // Challenge met - reset and continue
-                updates['faceCardChallenge'] = {
-                    active: false,
-                    faceCard: null,
-                    attemptsLeft: 0,
-                    originalPlayer: null
-                };
-            } else if (newChallenge.attemptsLeft <= 0) {
-                // Challenge failed - give pile to original player's right
-                const originalPlayerIndex = gameState.playerOrder.indexOf(newChallenge.originalPlayer);
-                const nextPlayerIndex = (originalPlayerIndex + 1) % gameState.playerOrder.length;
-                const nextPlayerId = gameState.playerOrder[nextPlayerIndex];
-                
-                const nextPlayer = gameState.players[nextPlayerId];
-                const newCards = [...nextPlayer.cards, ...gameState.centerPile, card];
-                
-                // Shuffle the won cards
-                for (let i = newCards.length - 1; i > 0; i--) {
-                    const j = Math.floor(Math.random() * (i + 1));
-                    [newCards[i], newCards[j]] = [newCards[j], newCards[i]];
-                }
-                
-                updates[`players/${nextPlayerId}/cards`] = newCards;
-                updates['centerPile'] = [];
-                updates['currentPlayer'] = nextPlayerId;
-                updates['currentPlayerIndex'] = nextPlayerIndex;
-                updates['faceCardChallenge'] = {
-                    active: false,
-                    faceCard: null,
-                    attemptsLeft: 0,
-                    originalPlayer: null
-                };
-                
-                firebase.database().ref(`games/${gameState.gameId}`).update(updates);
-                return;
-            } else {
-                updates['faceCardChallenge'] = newChallenge;
-            }
-        }
-    }
+    // Handle face card challenge
+    handleFaceCardChallenge(card, updates);
     
     // Move to next player
-    const nextPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.playerOrder.length;
-    const nextPlayerId = gameState.playerOrder[nextPlayerIndex];
-    
-    updates['currentPlayer'] = nextPlayerId;
-    updates['currentPlayerIndex'] = nextPlayerIndex;
+    advanceTurn(updates);
     
     firebase.database().ref(`games/${gameState.gameId}`).update(updates);
 }
 
-function slapPile() {
-    if (gameState.currentPlayer === gameState.playerId || 
-        gameState.centerPile.length === 0 ||
-        gameState.faceCardChallenge.active) return;
+function handleFaceCardChallenge(card, updates) {
+    if (!gameState.rules.faceCards) return;
     
-    const isValidSlap = checkValidSlap();
+    const cardValue = getCardValue(card);
+    const isFaceCard = ['jack', 'queen', 'king', 'ace'].includes(cardValue);
     
-    const updates = {};
-    updates['lastSlap'] = gameState.playerId;
-    updates['lastSlapValid'] = isValidSlap;
-    
-    if (isValidSlap) {
-        const winningPlayer = gameState.players[gameState.playerId];
-        const newCards = [...winningPlayer.cards, ...gameState.centerPile];
+    if (isFaceCard && !gameState.faceCardChallenge.active) {
+        // Start new challenge
+        const attempts = {
+            'ace': 4, 'king': 3, 'queen': 2, 'jack': 1
+        }[cardValue] || 0;
         
-        for (let i = newCards.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [newCards[i], newCards[j]] = [newCards[j], newCards[i]];
-        }
+        updates['faceCardChallenge'] = {
+            active: true,
+            faceCard: card,
+            attemptsLeft: attempts,
+            originalPlayer: gameState.playerId
+        };
+    } else if (gameState.faceCardChallenge.active) {
+        // Continue existing challenge
+        const newChallenge = {...gameState.faceCardChallenge};
+        newChallenge.attemptsLeft--;
         
-        updates[`players/${gameState.playerId}/cards`] = newCards;
-        updates['centerPile'] = [];
-        updates['currentPlayer'] = gameState.playerId;
-        updates['currentPlayerIndex'] = gameState.playerOrder.indexOf(gameState.playerId);
-        
-        // End any face card challenge
-        if (gameState.faceCardChallenge.active) {
+        if (isFaceCard) {
+            // Challenge met
             updates['faceCardChallenge'] = {
                 active: false,
                 faceCard: null,
                 attemptsLeft: 0,
                 originalPlayer: null
             };
+        } else if (newChallenge.attemptsLeft <= 0) {
+            // Challenge failed - give pile to next player
+            handleFailedChallenge(updates, card);
+            return; // Skip normal turn advancement
+        } else {
+            updates['faceCardChallenge'] = newChallenge;
         }
+    }
+}
+
+function handleFailedChallenge(updates, card) {
+    const originalPlayerIndex = gameState.playerOrder.indexOf(gameState.faceCardChallenge.originalPlayer);
+    const nextPlayerIndex = (originalPlayerIndex + 1) % gameState.playerOrder.length;
+    const nextPlayerId = gameState.playerOrder[nextPlayerIndex];
+    
+    const nextPlayer = gameState.players[nextPlayerId];
+    const newCards = [...nextPlayer.cards, ...gameState.centerPile, card];
+    
+    // Shuffle the won cards
+    shuffleArray(newCards);
+    
+    updates[`players/${nextPlayerId}/cards`] = newCards;
+    updates['centerPile'] = [];
+    updates['currentPlayer'] = nextPlayerId;
+    updates['currentPlayerIndex'] = nextPlayerIndex;
+    updates['faceCardChallenge'] = {
+        active: false,
+        faceCard: null,
+        attemptsLeft: 0,
+        originalPlayer: null
+    };
+}
+
+function advanceTurn(updates) {
+    const nextPlayerIndex = (gameState.currentPlayerIndex + 1) % gameState.playerOrder.length;
+    const nextPlayerId = gameState.playerOrder[nextPlayerIndex];
+    
+    updates['currentPlayer'] = nextPlayerId;
+    updates['currentPlayerIndex'] = nextPlayerIndex;
+}
+
+function slapPile() {
+    if (gameState.currentPlayer === gameState.playerId || 
+        !gameState.centerPile.length ||
+        gameState.faceCardChallenge.active) return;
+    
+    const isValidSlap = checkValidSlap();
+    const updates = {
+        'lastSlap': gameState.playerId,
+        'lastSlapValid': isValidSlap,
+        [`players/${gameState.playerId}/lastActive`]: firebase.database.ServerValue.TIMESTAMP
+    };
+    
+    if (isValidSlap) {
+        handleSuccessfulSlap(updates);
     } else {
         updates['burnInProgress'] = true;
     }
@@ -464,111 +484,210 @@ function slapPile() {
     firebase.database().ref(`games/${gameState.gameId}`).update(updates);
 }
 
+function handleSuccessfulSlap(updates) {
+    const winningPlayer = gameState.players[gameState.playerId];
+    const newCards = [...winningPlayer.cards, ...gameState.centerPile];
+    
+    shuffleArray(newCards);
+    
+    updates[`players/${gameState.playerId}/cards`] = newCards;
+    updates['centerPile'] = [];
+    updates['currentPlayer'] = gameState.playerId;
+    updates['currentPlayerIndex'] = gameState.playerOrder.indexOf(gameState.playerId);
+    
+    // End any face card challenge
+    if (gameState.faceCardChallenge.active) {
+        updates['faceCardChallenge'] = {
+            active: false,
+            faceCard: null,
+            attemptsLeft: 0,
+            originalPlayer: null
+        };
+    }
+}
+
 function checkValidSlap() {
-    if (gameState.centerPile.length === 0) return false;
+    if (!gameState.centerPile.length) return false;
     
-    // Check doubles
-    if (gameState.rules.doubles && gameState.centerPile.length >= 2) {
-        const card1 = gameState.centerPile[gameState.centerPile.length - 1];
-        const card2 = gameState.centerPile[gameState.centerPile.length - 2];
-        if (getCardValue(card1) === getCardValue(card2)) {
-            return true;
-        }
-    }
+    // Check all active slap rules
+    return (gameState.rules.doubles && checkDoubles()) ||
+           (gameState.rules.sandwich && checkSandwich()) ||
+           (gameState.rules.marriage && checkMarriage()) ||
+           (gameState.rules.topBottom && checkTopBottom()) ||
+           (gameState.rules.addsTo10 && checkAddsTo10()) ||
+           (gameState.rules.runs && checkRuns());
+}
+
+function checkDoubles() {
+    if (gameState.centerPile.length < 2) return false;
+    const card1 = gameState.centerPile[gameState.centerPile.length - 1];
+    const card2 = gameState.centerPile[gameState.centerPile.length - 2];
+    return getCardValue(card1) === getCardValue(card2);
+}
+
+function checkSandwich() {
+    if (gameState.centerPile.length < 3) return false;
+    const card1 = gameState.centerPile[gameState.centerPile.length - 1];
+    const card3 = gameState.centerPile[gameState.centerPile.length - 3];
+    return getCardValue(card1) === getCardValue(card3);
+}
+
+function checkMarriage() {
+    if (gameState.centerPile.length < 2) return false;
+    const card1 = gameState.centerPile[gameState.centerPile.length - 1];
+    const card2 = gameState.centerPile[gameState.centerPile.length - 2];
+    const val1 = getCardValue(card1);
+    const val2 = getCardValue(card2);
+    return (val1 === 'queen' && val2 === 'king') || (val1 === 'king' && val2 === 'queen');
+}
+
+function checkTopBottom() {
+    if (gameState.centerPile.length < 2) return false;
+    return getCardValue(gameState.centerPile[0]) === getCardValue(gameState.centerPile[gameState.centerPile.length - 1]);
+}
+
+function checkAddsTo10() {
+    if (gameState.centerPile.length < 2) return false;
     
-    // Check sandwich
-    if (gameState.rules.sandwich && gameState.centerPile.length >= 3) {
-        const card1 = gameState.centerPile[gameState.centerPile.length - 1];
-        const card3 = gameState.centerPile[gameState.centerPile.length - 3];
-        if (getCardValue(card1) === getCardValue(card3)) {
-            return true;
-        }
-    }
+    const cardValues = {
+        '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10,
+        'jack': 11, 'queen': 12, 'king': 13, 'ace': 14
+    };
     
-    // Check marriage (Q then K or K then Q)
-    if (gameState.rules.marriage && gameState.centerPile.length >= 2) {
-        const card1 = gameState.centerPile[gameState.centerPile.length - 1];
-        const card2 = gameState.centerPile[gameState.centerPile.length - 2];
-        const val1 = getCardValue(card1);
-        const val2 = getCardValue(card2);
-        
-        if ((val1 === 'queen' && val2 === 'king') || (val1 === 'king' && val2 === 'queen')) {
-            return true;
-        }
-    }
+    // Check all possible pairs in last 3 cards
+    const cardsToCheck = gameState.centerPile.slice(-3);
+    const values = cardsToCheck.map(card => cardValues[getCardValue(card)] || 0);
     
-    // Check top and bottom
-    if (gameState.rules.topBottom && gameState.centerPile.length >= 2) {
-        const firstCard = gameState.centerPile[0];
-        const lastCard = gameState.centerPile[gameState.centerPile.length - 1];
-        if (getCardValue(firstCard) === getCardValue(lastCard)) {
-            return true;
-        }
-    }
-    
-    // Check adds to 10
-    if (gameState.rules.addsTo10 && gameState.centerPile.length >= 2) {
-        const cardValues = {
-            '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10,
-            'jack': 11, 'queen': 12, 'king': 13, 'ace': 14
-        };
-        
-        // Check last two cards
-        const card1 = gameState.centerPile[gameState.centerPile.length - 1];
-        const card2 = gameState.centerPile[gameState.centerPile.length - 2];
-        const val1 = cardValues[getCardValue(card1)] || 0;
-        const val2 = cardValues[getCardValue(card2)] || 0;
-        
-        if (val1 + val2 === 10) {
-            return true;
-        }
-        
-        // Check last three cards (sum of any two)
-        if (gameState.centerPile.length >= 3) {
-            const card3 = gameState.centerPile[gameState.centerPile.length - 3];
-            const val3 = cardValues[getCardValue(card3)] || 0;
-            
-            if (val1 + val2 === 10 || val1 + val3 === 10 || val2 + val3 === 10) {
-                return true;
-            }
-        }
-    }
-    
-    // Check runs (4 ascending or descending)
-    if (gameState.rules.runs && gameState.centerPile.length >= 4) {
-        const cardValues = {
-            '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10,
-            'jack': 11, 'queen': 12, 'king': 13, 'ace': 14
-        };
-        
-        // Get last 4 cards
-        const cards = gameState.centerPile.slice(-4);
-        const values = cards.map(card => cardValues[getCardValue(card)] || 0);
-        
-        // Check ascending
-        let ascending = true;
-        for (let i = 1; i < values.length; i++) {
-            if (values[i] !== values[i-1] + 1) {
-                ascending = false;
-                break;
-            }
-        }
-        
-        // Check descending
-        let descending = true;
-        for (let i = 1; i < values.length; i++) {
-            if (values[i] !== values[i-1] - 1) {
-                descending = false;
-                break;
-            }
-        }
-        
-        if (ascending || descending) {
-            return true;
+    for (let i = 0; i < values.length; i++) {
+        for (let j = i + 1; j < values.length; j++) {
+            if (values[i] + values[j] === 10) return true;
         }
     }
     
     return false;
+}
+
+function checkRuns() {
+    if (gameState.centerPile.length < 4) return false;
+    
+    const cardValues = {
+        '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10,
+        'jack': 11, 'queen': 12, 'king': 13, 'ace': 14
+    };
+    
+    const cards = gameState.centerPile.slice(-4);
+    const values = cards.map(card => cardValues[getCardValue(card)] || 0);
+    
+    // Check ascending
+    let ascending = true;
+    for (let i = 1; i < values.length; i++) {
+        if (values[i] !== values[i-1] + 1) {
+            ascending = false;
+            break;
+        }
+    }
+    
+    // Check descending
+    let descending = true;
+    for (let i = 1; i < values.length; i++) {
+        if (values[i] !== values[i-1] - 1) {
+            descending = false;
+            break;
+        }
+    }
+    
+    return ascending || descending;
+}
+
+function burnCard() {
+    if (!gameState.burnInProgress || gameState.lastSlap !== gameState.playerId) return;
+    
+    const player = gameState.players[gameState.playerId];
+    if (player.cards.length === 0) return;
+    
+    const card = player.cards.pop();
+    
+    const updates = {
+        [`players/${gameState.playerId}/cards`]: player.cards,
+        'burnPile': [...gameState.burnPile, card],
+        'burnInProgress': false,
+        [`players/${gameState.playerId}/lastActive`]: firebase.database.ServerValue.TIMESTAMP
+    };
+    
+    firebase.database().ref(`games/${gameState.gameId}`).update(updates);
+}
+
+function checkForWinner() {
+    if (!gameState.gameStarted) return;
+    
+    const playersWithCards = Object.values(gameState.players).filter(p => p.cards.length > 0);
+    
+    if (playersWithCards.length === 1) {
+        showWinner(playersWithCards[0]);
+    } else if (playersWithCards.length === 0) {
+        showWinner(null);
+    }
+}
+
+function showWinner(winner) {
+    if (!winner) {
+        elements.winnerMessage.textContent = "Game ended in a tie!";
+    } else {
+        const isYou = winner.id === gameState.playerId;
+        elements.winnerMessage.textContent = isYou ? 
+            "You won the game! Congratulations!" : 
+            `${winner.name} won the game!`;
+    }
+    
+    elements.winModal.style.display = 'flex';
+}
+
+function playAgain() {
+    elements.winModal.style.display = 'none';
+    
+    if (gameState.playerId) {
+        database.ref(`games/${gameState.gameId}/players/${gameState.playerId}/cards`).set([]);
+    }
+    
+    const updates = {
+        centerPile: [],
+        lastPlayedCards: [],
+        lastSlap: null,
+        lastSlapValid: false,
+        burnPile: [],
+        gameStarted: false,
+        currentPlayer: null,
+        currentPlayerIndex: 0,
+        burnInProgress: false,
+        faceCardChallenge: {
+            active: false,
+            faceCard: null,
+            attemptsLeft: 0,
+            originalPlayer: null
+        }
+    };
+    
+    database.ref(`games/${gameState.gameId}`).update(updates).then(() => {
+        database.ref(`games/${gameState.gameId}/players`).once('value').then(snapshot => {
+            if (Object.keys(snapshot.val() || {}).length >= 2) {
+                startGame();
+            }
+        });
+    });
+}
+
+function updateRules() {
+    const rules = {
+        doubles: elements.ruleDoubles.checked,
+        sandwich: elements.ruleSandwich.checked,
+        marriage: elements.ruleMarriage.checked,
+        topBottom: elements.ruleTopBottom.checked,
+        addsTo10: elements.ruleAddsTo10.checked,
+        runs: elements.ruleRuns.checked,
+        faceCards: elements.ruleFaceCards.checked
+    };
+    
+    database.ref(`games/${gameState.gameId}/rules`).set(rules);
 }
 
 function getCardValue(cardName) {
@@ -592,92 +711,11 @@ function getCardDisplayName(cardName) {
     return `${valueNames[value]} of ${suitNames[suit]}`;
 }
 
-function burnCard() {
-    if (!gameState.burnInProgress || gameState.lastSlap !== gameState.playerId) return;
-    
-    const player = gameState.players[gameState.playerId];
-    if (player.cards.length === 0) return;
-    
-    const card = player.cards.pop();
-    
-    const updates = {};
-    updates[`players/${gameState.playerId}/cards`] = player.cards;
-    updates['burnPile'] = [...gameState.burnPile, card];
-    updates['burnInProgress'] = false;
-    
-    firebase.database().ref(`games/${gameState.gameId}`).update(updates);
-}
-
-function checkForWinner() {
-    if (!gameState.gameStarted) return;
-    
-    const playersWithCards = Object.values(gameState.players).filter(p => p.cards.length > 0);
-    
-    if (playersWithCards.length === 1) {
-        const winner = playersWithCards[0];
-        showWinner(winner);
-    } else if (playersWithCards.length === 0) {
-        showWinner(null);
+function shuffleArray(array) {
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
     }
-}
-
-function showWinner(winner) {
-    if (!winner) {
-        elements.winnerMessage.textContent = "Game ended in a tie!";
-    } else {
-        const isYou = winner.id === gameState.playerId;
-        elements.winnerMessage.textContent = isYou ? 
-            "You won the game! Congratulations!" : 
-            `${winner.name} won the game!`;
-    }
-    
-    elements.winModal.style.display = 'flex';
-}
-
-function playAgain() {
-    elements.winModal.style.display = 'none';
-    
-    if (gameState.playerId) {
-        firebase.database().ref(`games/${gameState.gameId}/players/${gameState.playerId}/cards`).set([]);
-    }
-    
-    firebase.database().ref(`games/${gameState.gameId}`).update({
-        centerPile: [],
-        lastPlayedCards: [],
-        lastSlap: null,
-        lastSlapValid: false,
-        burnPile: [],
-        gameStarted: false,
-        currentPlayer: null,
-        currentPlayerIndex: 0,
-        burnInProgress: false,
-        faceCardChallenge: {
-            active: false,
-            faceCard: null,
-            attemptsLeft: 0,
-            originalPlayer: null
-        }
-    });
-    
-    firebase.database().ref(`games/${gameState.gameId}/players`).once('value').then(snapshot => {
-        if (Object.keys(snapshot.val() || {}).length >= 2) {
-            startGame();
-        }
-    });
-}
-
-function updateRules() {
-    const rules = {
-        doubles: elements.ruleDoubles.checked,
-        sandwich: elements.ruleSandwich.checked,
-        marriage: elements.ruleMarriage.checked,
-        topBottom: elements.ruleTopBottom.checked,
-        addsTo10: elements.ruleAddsTo10.checked,
-        runs: elements.ruleRuns.checked,
-        faceCards: elements.ruleFaceCards.checked
-    };
-    
-    firebase.database().ref(`games/${gameState.gameId}/rules`).set(rules);
 }
 
 function generateId() {
@@ -725,9 +763,6 @@ function init() {
     initFirebase();
     setupEventListeners();
     
-    // Set up periodic activity tracking
-    setInterval(trackActivity, 10000);
-    
     // Set up periodic cleanup (every 30 seconds)
     gameState.cleanupInterval = setInterval(() => {
         database.ref(`games/${gameState.gameId}/players`).once('value').then(snapshot => {
@@ -735,7 +770,6 @@ function init() {
             const now = Date.now();
             
             Object.keys(players).forEach(playerId => {
-                // Don't remove self, and only remove inactive players
                 if (playerId !== gameState.playerId && 
                     now - (players[playerId].lastActive || 0) > 60000) {
                     database.ref(`games/${gameState.gameId}/players/${playerId}`).remove();
@@ -743,28 +777,6 @@ function init() {
             });
         });
     }, 30000);
-    
-    // Setup disconnect handler
-    if (gameState.playerId) {
-        const playerRef = database.ref(`games/${gameState.gameId}/players/${gameState.playerId}`);
-        playerRef.onDisconnect().remove();
-    }
-}
-
-// Add player activity tracking
-function trackActivity() {
-    if (gameState.playerId && gameState.gameStarted) {
-        database.ref(`games/${gameState.gameId}/players/${gameState.playerId}/lastActive`)
-            .set(firebase.database.ServerValue.TIMESTAMP);
-    }
-}
-
-    // Clean up on page unload
-    window.addEventListener('beforeunload', () => {
-        if (gameState.playerId) {
-            database.ref(`games/${gameState.gameId}/players/${gameState.playerId}`).remove();
-        }
-    });
 }
 
 document.addEventListener('DOMContentLoaded', init);
