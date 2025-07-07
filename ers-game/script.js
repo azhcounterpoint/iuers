@@ -725,12 +725,30 @@ function init() {
     initFirebase();
     setupEventListeners();
     
-    firebase.database().ref(`games/${gameState.gameId}/players`).on('value', (snapshot) => {
-        const players = snapshot.val() || {};
-        if (Object.keys(players).length >= 2 && !gameState.gameStarted) {
-            startGame();
-        }
-    });
+    // Set up periodic activity tracking
+    setInterval(trackActivity, 10000);
+    
+    // Set up periodic cleanup (every 30 seconds)
+    gameState.cleanupInterval = setInterval(() => {
+        database.ref(`games/${gameState.gameId}/players`).once('value').then(snapshot => {
+            const players = snapshot.val() || {};
+            const now = Date.now();
+            
+            Object.keys(players).forEach(playerId => {
+                // Don't remove self, and only remove inactive players
+                if (playerId !== gameState.playerId && 
+                    now - (players[playerId].lastActive || 0) > 60000) {
+                    database.ref(`games/${gameState.gameId}/players/${playerId}`).remove();
+                }
+            });
+        });
+    }, 30000);
+    
+    // Setup disconnect handler
+    if (gameState.playerId) {
+        const playerRef = database.ref(`games/${gameState.gameId}/players/${gameState.playerId}`);
+        playerRef.onDisconnect().remove();
+    }
 }
 
 // Add player activity tracking
@@ -741,28 +759,6 @@ function trackActivity() {
     }
 }
 
-// Initialize the game
-function init() {
-    initFirebase();
-    setupEventListeners();
-    
-    // Set up periodic activity tracking
-    setInterval(trackActivity, 10000);
-    
-    // Set up periodic cleanup
-    gameState.cleanupInterval = setInterval(() => {
-        database.ref(`games/${gameState.gameId}/players`).once('value').then(snapshot => {
-            const players = snapshot.val() || {};
-            const now = Date.now();
-            
-            Object.keys(players).forEach(playerId => {
-                if (now - (players[playerId].lastActive || 0) > 60000) {
-                    database.ref(`games/${gameState.gameId}/players/${playerId}`).remove();
-                }
-            });
-        });
-    }, 30000);
-    
     // Clean up on page unload
     window.addEventListener('beforeunload', () => {
         if (gameState.playerId) {
