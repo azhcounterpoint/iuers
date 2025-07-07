@@ -2,7 +2,7 @@
 const gameState = {
     playerId: null,
     playerName: '',
-    gameId: 'ers-game-1', // Single game room for simplicity
+    gameId: 'ers-game-1',
     players: {},
     currentPlayer: null,
     centerPile: [],
@@ -29,7 +29,9 @@ const gameState = {
         faceCard: null,
         attemptsLeft: 0,
         originalPlayer: null
-    }
+    },
+    cleanupInterval: null,
+    previousPlayers: {}
 };
 
 // DOM elements
@@ -61,25 +63,94 @@ const elements = {
     ruleTopBottom: document.getElementById('rule-top-bottom'),
     ruleAddsTo10: document.getElementById('rule-adds-to-10'),
     ruleRuns: document.getElementById('rule-runs'),
-    ruleFaceCards: document.getElementById('rule-face-cards')
+    ruleFaceCards: document.getElementById('rule-face-cards'),
+    connectionStatus: document.getElementById('connection-status'),
+    systemMessage: document.getElementById('system-message')
 };
 
 // Initialize Firebase
+const database = firebase.database();
+
 function initFirebase() {
-    firebase.initializeApp(firebaseConfig);
-    const database = firebase.database();
-    
+    // Setup presence detection
+    const isOfflineForDatabase = {
+        state: 'offline',
+        lastActive: firebase.database.ServerValue.TIMESTAMP
+    };
+
+    const isOnlineForDatabase = {
+        state: 'online',
+        lastActive: firebase.database.ServerValue.TIMESTAMP
+    };
+
+    database.ref('.info/connected').on('value', (snapshot) => {
+        if (snapshot.val() === false) {
+            elements.connectionStatus.textContent = 'Offline';
+            elements.connectionStatus.classList.remove('connected');
+            return;
+        }
+
+        elements.connectionStatus.textContent = 'Online';
+        elements.connectionStatus.classList.add('connected');
+
+        if (gameState.playerId) {
+            const playerRef = database.ref(`games/${gameState.gameId}/players/${gameState.playerId}`);
+            playerRef.update(isOnlineForDatabase);
+            playerRef.onDisconnect().update(isOfflineForDatabase);
+            playerRef.onDisconnect().remove().catch(() => {});
+        }
+    });
+
+    // Listen for game state changes
     database.ref(`games/${gameState.gameId}`).on('value', (snapshot) => {
         const data = snapshot.val();
         if (data) {
+            // Track previous players for disconnect detection
+            gameState.previousPlayers = {...gameState.players};
+            
             updateGameState(data);
             renderGame();
+            checkPlayerChanges();
         }
     });
 }
 
+function checkPlayerChanges() {
+    // Check for players who left
+    Object.keys(gameState.previousPlayers).forEach(playerId => {
+        if (!gameState.players[playerId] && playerId !== gameState.playerId) {
+            showSystemMessage(`${gameState.previousPlayers[playerId].name} left the game`);
+        }
+    });
+
+    // Check for new players
+    Object.keys(gameState.players).forEach(playerId => {
+        if (!gameState.previousPlayers[playerId] && playerId !== gameState.playerId) {
+            showSystemMessage(`${gameState.players[playerId].name} joined the game`);
+        }
+    });
+}
+
+function showSystemMessage(message) {
+    elements.systemMessage.textContent = message;
+    setTimeout(() => {
+        elements.systemMessage.textContent = '';
+    }, 5000);
+}
+
+// Update game state from Firebase data
 function updateGameState(data) {
-    gameState.players = data.players || {};
+    // Filter out inactive players (lastActive > 60 seconds ago)
+    const activePlayers = {};
+    const now = Date.now();
+    Object.entries(data.players || {}).forEach(([id, player]) => {
+        if (!player.lastActive || (now - player.lastActive) < 60000) {
+            activePlayers[id] = player;
+        }
+    });
+
+    // Update all game state
+    gameState.players = activePlayers;
     gameState.currentPlayer = data.currentPlayer || null;
     gameState.centerPile = data.centerPile || [];
     gameState.lastPlayedCards = data.lastPlayedCards || [];
@@ -96,7 +167,8 @@ function updateGameState(data) {
         attemptsLeft: 0,
         originalPlayer: null
     };
-    
+    gameState.burnInProgress = data.burnInProgress || false;
+
     // Update rules checkboxes
     if (data.rules) {
         elements.ruleDoubles.checked = data.rules.doubles;
@@ -657,6 +729,44 @@ function init() {
         const players = snapshot.val() || {};
         if (Object.keys(players).length >= 2 && !gameState.gameStarted) {
             startGame();
+        }
+    });
+}
+
+// Add player activity tracking
+function trackActivity() {
+    if (gameState.playerId && gameState.gameStarted) {
+        database.ref(`games/${gameState.gameId}/players/${gameState.playerId}/lastActive`)
+            .set(firebase.database.ServerValue.TIMESTAMP);
+    }
+}
+
+// Initialize the game
+function init() {
+    initFirebase();
+    setupEventListeners();
+    
+    // Set up periodic activity tracking
+    setInterval(trackActivity, 10000);
+    
+    // Set up periodic cleanup
+    gameState.cleanupInterval = setInterval(() => {
+        database.ref(`games/${gameState.gameId}/players`).once('value').then(snapshot => {
+            const players = snapshot.val() || {};
+            const now = Date.now();
+            
+            Object.keys(players).forEach(playerId => {
+                if (now - (players[playerId].lastActive || 0) > 60000) {
+                    database.ref(`games/${gameState.gameId}/players/${playerId}`).remove();
+                }
+            });
+        });
+    }, 30000);
+    
+    // Clean up on page unload
+    window.addEventListener('beforeunload', () => {
+        if (gameState.playerId) {
+            database.ref(`games/${gameState.gameId}/players/${gameState.playerId}`).remove();
         }
     });
 }
