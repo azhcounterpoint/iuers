@@ -100,11 +100,6 @@ function initFirebase() {
         console.error("Connection error:", error);
         updateConnectionStatus('error');
     });
-    if (!firebase.apps.length) {
-  firebase.initializeApp(firebaseConfig);
- }
- console.log("Firebase initialized:", firebase.app().name);
-
     // Listen for game state changes
     database.ref(`games/${gameState.gameId}`).on('value', (snapshot) => {
         const data = snapshot.val();
@@ -784,5 +779,14 @@ function init() {
         });
     }, 30000);
 }
+// Connection state listener
+database.ref('.info/connected').on('value', (snap) => {
+  console.log("Firebase connection:", snap.val() ? "✅ Connected" : "❌ Disconnected");
+});
 
+// Error listener
+database.ref().on('value', 
+  (snap) => console.log("Data read successful:", snap.val()),
+  (err) => console.error("Firebase error:", err)
+);
 document.addEventListener('DOMContentLoaded', init);
