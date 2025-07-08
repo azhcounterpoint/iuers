@@ -1,4 +1,3 @@
-// Game state and configuration
 const gameState = {
     playerId: null,
     playerName: '',
