@@ -33,7 +33,9 @@ const gameState = {
     cleanupInterval: null,
     previousPlayers: {}
 };
-
+database.ref('.info/connected').on('value', (snapshot) => {
+  console.log("Firebase connection status:", snapshot.val());
+});
 // DOM elements
 const elements = {
     centerPile: document.getElementById('center-pile'),
