@@ -100,6 +100,10 @@ function initFirebase() {
         console.error("Connection error:", error);
         updateConnectionStatus('error');
     });
+    if (!firebase.apps.length) {
+  firebase.initializeApp(firebaseConfig);
+ }
+ console.log("Firebase initialized:", firebase.app().name);
 
     // Listen for game state changes
     database.ref(`games/${gameState.gameId}`).on('value', (snapshot) => {
